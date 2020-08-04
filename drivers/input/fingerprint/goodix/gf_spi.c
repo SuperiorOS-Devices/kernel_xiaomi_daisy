@@ -1,7 +1,7 @@
 /*
  * TEE driver for goodix fingerprint sensor
  * Copyright (C) 2016 Goodix
- * Copyright (C) 2019 XiaoMi, Inc.
+ * Copyright (C) 2020 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,7 +41,7 @@
 #include <linux/fb.h>
 #include <linux/pm_qos.h>
 #include <linux/cpufreq.h>
-#include <linux/mdss_io_util.h>
+#include <linux/kernel.h>
 #include "gf_spi.h"
 
 #if defined(USE_SPI_BUS)
@@ -51,16 +51,11 @@
 #include <linux/platform_device.h>
 #endif
 
-
-#define WAKELOCK_HOLD_TIME 2000 /* in ms */
-#define FP_UNLOCK_REJECTION_TIMEOUT (WAKELOCK_HOLD_TIME - 500)
-
-
 #define VER_MAJOR   1
 #define VER_MINOR   2
 #define PATCH_LEVEL 11
 
-
+#define WAKELOCK_HOLD_TIME 500 /* in ms */
 
 #define GF_SPIDEV_NAME     "goodix,fingerprint"
 /*device name after register in charater*/
@@ -76,7 +71,8 @@ static int SPIDEV_MAJOR;
 static DECLARE_BITMAP(minors, N_SPI_MINORS);
 static LIST_HEAD(device_list);
 static DEFINE_MUTEX(device_list_lock);
-static struct wakeup_source fp_wakelock;
+//static struct wake_lock fp_wakelock;
+static struct wakeup_source fp_wakesrc;
 static struct gf_dev gf;
 
 static struct gf_key_map maps[] = {
@@ -320,31 +316,14 @@ static void nav_event_input(struct gf_dev *gf_dev, gf_nav_event_t nav_event)
 	}
 }
 
-
-static void notification_work(struct work_struct *work)
-{
-	mdss_prim_panel_fb_unblank(FP_UNLOCK_REJECTION_TIMEOUT);
-	pr_debug("unblank\n");
-}
-
-
 static irqreturn_t gf_irq(int irq, void *handle)
 {
 #if defined(GF_NETLINK_ENABLE)
-    struct gf_dev *gf_dev = &gf;
 	char msg = GF_NET_EVENT_IRQ;
 
-	__pm_wakeup_event(&fp_wakelock, msecs_to_jiffies(WAKELOCK_HOLD_TIME));
-
+	//wake_lock_timeout(&fp_wakelock, msecs_to_jiffies(WAKELOCK_HOLD_TIME));
+	__pm_wakeup_event(&fp_wakesrc, WAKELOCK_HOLD_TIME);
 	sendnlmsg(&msg);
-
-
-	if ((gf_dev->wait_finger_down == true) && (gf_dev->device_available == 1) && (gf_dev->fb_black == 1)) {
-		gf_dev->wait_finger_down = false;
-		schedule_work(&gf_dev->work);
-	}
-
-
 #elif defined(GF_FASYNC)
 	struct gf_dev *gf_dev = &gf;
 
@@ -575,8 +554,8 @@ static int gf_open(struct inode *inode, struct file *filp)
 			gf_dev->users++;
 			filp->private_data = gf_dev;
 			nonseekable_open(inode, filp);
-			pr_info("Succeed to open device. irq = %d\n",
-					gf_dev->irq);
+			pr_info("Succeed to open device. irq = %d, gf_dev->users = %d\n",
+					gf_dev->irq, gf_dev->users);
 			if (gf_dev->users == 1) {
 				status = gf_parse_dts(gf_dev);
 				if (status)
@@ -628,8 +607,9 @@ static int gf_release(struct inode *inode, struct file *filp)
 
 		pr_info("disble_irq. irq = %d\n", gf_dev->irq);
 
-                irq_cleanup(gf_dev);
-                gf_cleanup(gf_dev);
+		irq_cleanup(gf_dev);
+		gf_cleanup(gf_dev);
+        
 		/*power off the sensor*/
 		gf_dev->device_available = 0;
 		gf_power_off(gf_dev);
@@ -663,23 +643,20 @@ static int goodix_fb_state_chg_callback(struct notifier_block *nb,
 	unsigned int blank;
 	char msg = 0;
 
-	if (val != FB_EVENT_BLANK)
+	if (val != FB_EARLY_EVENT_BLANK)
 		return 0;
 	pr_info("[info] %s go to the goodix_fb_state_chg_callback value = %d\n",
 			__func__, (int)val);
 	gf_dev = container_of(nb, struct gf_dev, notifier);
-
-
-	if (evdata && evdata->data && val == FB_EVENT_BLANK && gf_dev) {
+	if (evdata && evdata->data && val == FB_EARLY_EVENT_BLANK && gf_dev) {
 		blank = *(int *)(evdata->data);
 		switch (blank) {
 		case FB_BLANK_POWERDOWN:
 			if (gf_dev->device_available == 1) {
 				gf_dev->fb_black = 1;
-				gf_dev->wait_finger_down = true;
 #if defined(GF_NETLINK_ENABLE)
 				msg = GF_NET_EVENT_FB_BLACK;
-
+				sendnlmsg(&msg);
 #elif defined(GF_FASYNC)
 				if (gf_dev->async)
 					kill_fasync(&gf_dev->async, SIGIO, POLL_IN);
@@ -691,7 +668,7 @@ static int goodix_fb_state_chg_callback(struct notifier_block *nb,
 				gf_dev->fb_black = 0;
 #if defined(GF_NETLINK_ENABLE)
 				msg = GF_NET_EVENT_FB_UNBLACK;
-
+				sendnlmsg(&msg);
 #elif defined(GF_FASYNC)
 				if (gf_dev->async)
 					kill_fasync(&gf_dev->async, SIGIO, POLL_IN);
@@ -734,11 +711,6 @@ static int gf_probe(struct platform_device *pdev)
 	gf_dev->pwr_gpio = -EINVAL;
 	gf_dev->device_available = 0;
 	gf_dev->fb_black = 0;
-
-
-	gf_dev->wait_finger_down = false;
-	INIT_WORK(&gf_dev->work, notification_work);
-
 
 	/* If we can allocate a minor number, hook up this device.
 	 * Reusing minors is fine so long as udev or mdev is working.
@@ -799,8 +771,8 @@ static int gf_probe(struct platform_device *pdev)
 	gf_dev->notifier = goodix_noti_block;
 	fb_register_client(&gf_dev->notifier);
 
-	wakeup_source_init(&fp_wakelock, "fp_wakelock");
-
+	//wake_lock_init(&fp_wakelock, WAKE_LOCK_SUSPEND, "fp_wakelock");
+    wakeup_source_init(&fp_wakesrc, "fp_wakesrc");
 	pr_info("version V%d.%d.%02d\n", VER_MAJOR, VER_MINOR, PATCH_LEVEL);
 printk("gf probe success\n");
 	return status;
@@ -837,7 +809,8 @@ static int gf_remove(struct platform_device *pdev)
 {
 	struct gf_dev *gf_dev = &gf;
 
-	wakeup_source_trash(&fp_wakelock);
+	//wake_lock_destroy(&fp_wakelock);
+	wakeup_source_trash(&fp_wakesrc);
 	fb_unregister_client(&gf_dev->notifier);
 	if (gf_dev->input)
 		input_unregister_device(gf_dev->input);
@@ -855,6 +828,7 @@ static int gf_remove(struct platform_device *pdev)
 
 static const struct of_device_id gx_match_table[] = {
 	{ .compatible = GF_SPIDEV_NAME },
+	{ .compatible = GF_DEV_NAME },
 	{},
 };
 
