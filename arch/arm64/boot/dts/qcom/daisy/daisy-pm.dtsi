@@ -286,7 +286,10 @@
 			qcom,en-cabc;
 		};
 		pmi_haptic: qcom,haptics@c000 {
-			qcom,vmax-mv = <3000>;
+			qcom,vmax-mv = <2000>;
+			qcom,ilim-ma = <800>;
+			qcom,sc-deb-cycles = <8>;
+			qcom,int-pwm-freq-khz = <505>;
 			qcom,actuator-type = <1>;
 			qcom,use-play-irq;
 			qcom,use-sc-irq;
