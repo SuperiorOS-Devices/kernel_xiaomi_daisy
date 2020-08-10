@@ -260,6 +260,8 @@
 			qcom,iterm-ma = <200>;
 			qcom,float-voltage-mv = <4400>;
 			qcom,resume-delta-mv = <50>;
+			qcom,chg-led-sw-controls;
+			qcom,chg-led-support;
 			qcom,charge-unknown-battery;
 			/delete-property/ qcom,parallel-usb-min-current-ma;
 			/delete-property/ qcom,parallel-usb-9v-min-current-ma;
@@ -267,6 +269,7 @@
 			qcom,override-usb-current;
 			qcom,fastchg-current-comp = <900>;
 			qcom,float-voltage-comp = <16>;
+			qcom,thermal-mitigation = <3000 2500 2000 2000 1000 1000 0>;
 			/delete-property/ qcom,autoadjust-vfloat;
 		};
 		pmi8950_fg: qcom,fg {
